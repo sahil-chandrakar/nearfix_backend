@@ -1,0 +1,1 @@
+"""NearFix backend application package."""
