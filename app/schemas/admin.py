@@ -56,6 +56,10 @@ class UserActiveUpdate(CamelModel):
     is_active: bool
 
 
+class UserPasswordReset(CamelModel):
+    new_password: str = Field(min_length=8, max_length=128)
+
+
 class AdminAuditLogRead(CamelModel):
     id: int
     admin_user_id: int | None

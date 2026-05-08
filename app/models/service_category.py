@@ -14,7 +14,9 @@ class ServiceCategory(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
     slug: Mapped[str] = mapped_column(String(100), unique=True, index=True, nullable=False)
     label: Mapped[str] = mapped_column(String(255), nullable=False)
+    label_hi: Mapped[str] = mapped_column(String(255), nullable=False)
     group: Mapped[str] = mapped_column(String(100), index=True, nullable=False)
+    group_hi: Mapped[str] = mapped_column(String(100), nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, index=True, nullable=False)
     display_order: Mapped[int] = mapped_column(Integer, default=0, index=True, nullable=False)
     created_at: Mapped[datetime] = mapped_column(

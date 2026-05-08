@@ -290,6 +290,7 @@ def test_customer_provider_search_filters_approved_category_and_distance(
 def test_customer_call_creates_pending_booking_and_provider_can_accept(
     client: TestClient,
 ) -> None:
+    admin_token = create_admin_token(client)
     provider_token = register_provider(client)
     customer_token = register_customer(client)
 
@@ -306,6 +307,17 @@ def test_customer_call_creates_pending_booking_and_provider_can_accept(
         db.commit()
 
     with_test_db(approve_provider)
+
+    initial_summary_response = client.get(
+        "/api/v1/admin/summary",
+        headers=auth_headers(admin_token),
+    )
+    assert initial_summary_response.status_code == 200
+    initial_summary = initial_summary_response.json()
+    assert initial_summary["totalBookings"] == 0
+    assert initial_summary["pendingBookings"] == 0
+    assert initial_summary["acceptedBookings"] == 0
+    assert initial_summary["declinedBookings"] == 0
 
     create_response = client.post(
         "/api/v1/customer/bookings",
@@ -324,6 +336,17 @@ def test_customer_call_creates_pending_booking_and_provider_can_accept(
     assert created_booking["serviceLabel"] == "Bike Mechanic"
     assert created_booking["distanceKm"] is not None
 
+    created_summary_response = client.get(
+        "/api/v1/admin/summary",
+        headers=auth_headers(admin_token),
+    )
+    assert created_summary_response.status_code == 200
+    created_summary = created_summary_response.json()
+    assert created_summary["totalBookings"] == 1
+    assert created_summary["pendingBookings"] == 1
+    assert created_summary["acceptedBookings"] == 0
+    assert created_summary["declinedBookings"] == 0
+
     pending_response = client.get(
         "/api/v1/provider/bookings?status=pending",
         headers=auth_headers(provider_token),
@@ -338,6 +361,17 @@ def test_customer_call_creates_pending_booking_and_provider_can_accept(
     )
     assert accept_response.status_code == 200
     assert accept_response.json()["status"] == "accepted"
+
+    accepted_summary_response = client.get(
+        "/api/v1/admin/summary",
+        headers=auth_headers(admin_token),
+    )
+    assert accepted_summary_response.status_code == 200
+    accepted_summary = accepted_summary_response.json()
+    assert accepted_summary["totalBookings"] == 1
+    assert accepted_summary["pendingBookings"] == 0
+    assert accepted_summary["acceptedBookings"] == 1
+    assert accepted_summary["declinedBookings"] == 0
 
     accepted_response = client.get(
         "/api/v1/provider/bookings?status=accepted",
@@ -559,6 +593,126 @@ def test_admin_rejects_provider_with_required_reason_and_audit_log(
     with_test_db(assert_audit_log)
 
 
+def test_admin_can_reset_customer_password_and_audit_log_excludes_password(
+    client: TestClient,
+) -> None:
+    register_customer(client)
+    admin_token = create_admin_token(client)
+
+    reset_response = client.patch(
+        "/api/v1/admin/users/1/password",
+        headers=auth_headers(admin_token),
+        json={"newPassword": "newpass123"},
+    )
+    assert reset_response.status_code == 204
+
+    old_login_response = client.post(
+        "/api/v1/customer/login",
+        json={"phone": "7970054811", "password": "password123"},
+    )
+    assert old_login_response.status_code == 401
+
+    new_login_response = client.post(
+        "/api/v1/customer/login",
+        json={"phone": "7970054811", "password": "newpass123"},
+    )
+    assert new_login_response.status_code == 200
+
+    def assert_audit_log(db):
+        audit_log = db.query(AdminAuditLog).filter_by(action="user_password_reset").first()
+        assert audit_log is not None
+        assert audit_log.target_type == "user"
+        assert audit_log.target_id == "1"
+        assert "customer" in (audit_log.metadata_json or "")
+        assert "newpass123" not in (audit_log.metadata_json or "")
+
+    with_test_db(assert_audit_log)
+
+
+def test_admin_can_reset_provider_password(client: TestClient) -> None:
+    register_provider(client)
+    admin_token = create_admin_token(client)
+
+    reset_response = client.patch(
+        "/api/v1/admin/users/1/password",
+        headers=auth_headers(admin_token),
+        json={"newPassword": "providerpass123"},
+    )
+    assert reset_response.status_code == 204
+
+    old_login_response = client.post(
+        "/api/v1/provider/login",
+        json={"phone": "7970054822", "password": "password123"},
+    )
+    assert old_login_response.status_code == 401
+
+    new_login_response = client.post(
+        "/api/v1/provider/login",
+        json={"phone": "7970054822", "password": "providerpass123"},
+    )
+    assert new_login_response.status_code == 200
+
+
+def test_admin_password_reset_rejects_wrong_roles_inactive_and_invalid_payloads(
+    client: TestClient,
+) -> None:
+    customer_token = register_customer(client)
+    admin_token = create_admin_token(client)
+
+    non_admin_response = client.patch(
+        "/api/v1/admin/users/1/password",
+        headers=auth_headers(customer_token),
+        json={"newPassword": "newpass123"},
+    )
+    assert non_admin_response.status_code == 403
+
+    short_password_response = client.patch(
+        "/api/v1/admin/users/1/password",
+        headers=auth_headers(admin_token),
+        json={"newPassword": "short"},
+    )
+    assert short_password_response.status_code == 422
+
+    missing_user_response = client.patch(
+        "/api/v1/admin/users/999/password",
+        headers=auth_headers(admin_token),
+        json={"newPassword": "newpass123"},
+    )
+    assert missing_user_response.status_code == 404
+
+    def deactivate_customer(db):
+        customer = db.query(User).filter_by(phone="7970054811").one()
+        customer.is_active = False
+        db.add(customer)
+        db.commit()
+
+    with_test_db(deactivate_customer)
+
+    inactive_response = client.patch(
+        "/api/v1/admin/users/1/password",
+        headers=auth_headers(admin_token),
+        json={"newPassword": "newpass123"},
+    )
+    assert inactive_response.status_code == 400
+
+    def admin_user_id(db):
+        return db.query(User).filter_by(role=UserRole.ADMIN.value).one().id
+
+    admin_id_holder: dict[str, int] = {}
+
+    def capture_admin_id(db):
+        admin_id_holder["id"] = admin_user_id(db)
+
+    with_test_db(capture_admin_id)
+
+    admin_reset_response = client.patch(
+        f"/api/v1/admin/users/{admin_id_holder['id']}/password",
+        headers=auth_headers(admin_token),
+        json={"newPassword": "newpass123"},
+    )
+    assert admin_reset_response.status_code == 400
+
+
 def test_admin_banner_upload_and_customer_banner_endpoint(client: TestClient) -> None:
     admin_token = create_admin_token(client)
 
@@ -595,18 +749,23 @@ def test_admin_added_service_is_available_until_disabled(client: TestClient) -> 
     create_response = client.post(
         "/api/v1/admin/services",
         headers=auth_headers(admin_token),
-        json={"label": "Solar Panel Cleaning"},
+        json={"label": "Solar Panel Cleaning", "labelHi": "सोलर पैनल सफाई"},
     )
     assert create_response.status_code == 201
     service = create_response.json()
     assert service["group"] == "Other Services"
+    assert service["groupHi"] == "अन्य सेवाएं"
+    assert service["labelHi"] == "सोलर पैनल सफाई"
     assert service["slug"] == "solar-panel-cleaning"
 
     categories_response = client.get("/api/v1/categories")
     assert categories_response.status_code == 200
-    assert "solar-panel-cleaning" in [
-        category["slug"] for category in categories_response.json()
-    ]
+    categories = categories_response.json()
+    assert next(category for category in categories if category["slug"] == "plumber")["labelHi"] == "प्लंबर"
+    assert "solar-panel-cleaning" in [category["slug"] for category in categories]
+    assert next(category for category in categories if category["slug"] == "solar-panel-cleaning")[
+        "labelHi"
+    ] == "सोलर पैनल सफाई"
 
     save_response = client.put(
         "/api/v1/provider/categories",

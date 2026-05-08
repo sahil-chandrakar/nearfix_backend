@@ -15,7 +15,9 @@ class ServiceCategoryRepository:
             ServiceCategory(
                 slug=category.slug,
                 label=category.label,
+                label_hi=category.label_hi,
                 group=category.group,
+                group_hi=category.group_hi,
                 display_order=index,
             )
             for index, category in enumerate(SERVICE_CATEGORIES, start=1)
@@ -57,13 +59,17 @@ class ServiceCategoryRepository:
         *,
         slug: str,
         label: str,
+        label_hi: str,
         group: str,
+        group_hi: str,
         display_order: int,
     ) -> ServiceCategory:
         category = ServiceCategory(
             slug=slug,
             label=label,
+            label_hi=label_hi,
             group=group,
+            group_hi=group_hi,
             display_order=display_order,
         )
         db.add(category)
@@ -77,11 +83,14 @@ class ServiceCategoryRepository:
         *,
         category: ServiceCategory,
         label: str | None = None,
+        label_hi: str | None = None,
         display_order: int | None = None,
         is_active: bool | None = None,
     ) -> ServiceCategory:
         if label is not None:
             category.label = label
+        if label_hi is not None:
+            category.label_hi = label_hi
         if display_order is not None:
             category.display_order = display_order
         if is_active is not None:

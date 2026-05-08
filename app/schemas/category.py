@@ -5,17 +5,21 @@ class ServiceCategoryRead(CamelModel):
     id: int | None = None
     slug: str
     label: str
+    label_hi: str
     group: str
+    group_hi: str
     is_active: bool = True
     display_order: int = 0
 
 
 class ServiceCategoryCreate(CamelModel):
     label: str
+    label_hi: str
 
 
 class ServiceCategoryUpdate(CamelModel):
     label: str | None = None
+    label_hi: str | None = None
     display_order: int | None = None
     is_active: bool | None = None
 

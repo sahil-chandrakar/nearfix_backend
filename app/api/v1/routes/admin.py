@@ -6,7 +6,7 @@ from fastapi.responses import FileResponse
 from sqlalchemy import func, select
 
 from app.api.deps import AdminUser, DBSession
-from app.core.security import create_access_token
+from app.core.security import create_access_token, get_password_hash
 from app.models.booking import Booking, BookingStatus
 from app.models.customer_home_banner import CustomerHomeBanner
 from app.models.provider_document_change_request import (
@@ -33,6 +33,7 @@ from app.schemas.admin import (
     AdminProviderRead,
     AdminSummary,
     UserActiveUpdate,
+    UserPasswordReset,
 )
 from app.schemas.auth import Token
 from app.schemas.banner import BannerRead, BannerSettingsRead, BannerSettingsUpdate, BannerUpdate
@@ -97,7 +98,9 @@ def _category_to_read(category: ServiceCategory) -> ServiceCategoryRead:
         id=category.id,
         slug=category.slug,
         label=category.label,
+        label_hi=category.label_hi,
         group=category.group,
+        group_hi=category.group_hi,
         is_active=category.is_active,
         display_order=category.display_order,
     )
@@ -423,6 +426,42 @@ def update_user_active(
     )
 
 
+@router.patch("/users/{user_id}/password", status_code=status.HTTP_204_NO_CONTENT)
+def reset_user_password(
+    user_id: int,
+    payload: UserPasswordReset,
+    current_user: AdminUser,
+    db: DBSession,
+) -> None:
+    user = UserRepository.get_by_id(db, user_id=user_id)
+    if user is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+    if user.role not in {UserRole.CUSTOMER.value, UserRole.PROVIDER.value}:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Only customer and provider passwords can be reset here",
+        )
+    if not user.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Inactive users must be restored before password reset",
+        )
+
+    UserRepository.update_password(
+        db,
+        user=user,
+        hashed_password=get_password_hash(payload.new_password),
+    )
+    AuditRepository.create(
+        db,
+        admin_user=current_user,
+        action="user_password_reset",
+        target_type="user",
+        target_id=user_id,
+        metadata={"role": user.role},
+    )
+
+
 @router.get("/audit-logs", response_model=list[AdminAuditLogRead])
 def list_audit_logs(_current_user: AdminUser, db: DBSession) -> list[AdminAuditLogRead]:
     return AuditRepository.list_recent(db)
@@ -550,13 +589,18 @@ def create_service(
     db: DBSession,
 ) -> ServiceCategoryRead:
     label = payload.label.strip()
+    label_hi = payload.label_hi.strip()
     if len(label) < 2:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="Service label is too short")
+    if len(label_hi) < 2:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="Hindi service label is too short")
     category = ServiceCategoryRepository.create(
         db,
         slug=_unique_service_slug(db, label),
         label=label,
+        label_hi=label_hi,
         group="Other Services",
+        group_hi="अन्य सेवाएं",
         display_order=ServiceCategoryRepository.next_display_order(db, group="Other Services"),
     )
     AuditRepository.create(
@@ -565,7 +609,7 @@ def create_service(
         action="service_created",
         target_type="service_category",
         target_id=category.id,
-        metadata={"slug": category.slug, "label": category.label},
+        metadata={"slug": category.slug, "label": category.label, "labelHi": category.label_hi},
     )
     return _category_to_read(category)
 
@@ -581,12 +625,16 @@ def update_service(
     if category is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Service not found")
     label = payload.label.strip() if payload.label is not None else None
+    label_hi = payload.label_hi.strip() if payload.label_hi is not None else None
     if label is not None and len(label) < 2:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="Service label is too short")
+    if label_hi is not None and len(label_hi) < 2:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="Hindi service label is too short")
     updated = ServiceCategoryRepository.update(
         db,
         category=category,
         label=label,
+        label_hi=label_hi,
         display_order=payload.display_order,
         is_active=payload.is_active,
     )

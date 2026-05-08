@@ -17,7 +17,9 @@ class CategoryService:
                 id=category.id,
                 slug=category.slug,
                 label=category.label,
+                label_hi=category.label_hi,
                 group=category.group,
+                group_hi=category.group_hi,
                 is_active=category.is_active,
                 display_order=category.display_order,
             )
