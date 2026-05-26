@@ -21,6 +21,7 @@ from app.core.security import create_access_token, decode_access_token
 from app.db.session import get_db
 from app.models.booking import BookingStatus
 from app.models.provider_document_change_request import ProviderDocumentType
+from app.models.provider_profile import ProviderProfile, ProviderVerificationStatus
 from app.models.user import UserRole
 from app.repositories.user_repository import UserRepository
 from app.schemas.auth import Token
@@ -42,6 +43,26 @@ from app.services.provider_service import ProviderService
 from app.services.upload_service import UploadService
 
 router = APIRouter(prefix="/provider", tags=["provider"])
+
+
+def _provider_profile_for_user(db: DBSession, current_user: ProviderUser) -> ProviderProfile:
+    return AuthService.get_provider_profile(db=db, user_id=current_user.id)
+
+
+def _ensure_not_rejected(profile: ProviderProfile) -> None:
+    if profile.verification_status == ProviderVerificationStatus.REJECTED.value:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Provider verification was rejected",
+        )
+
+
+def _ensure_approved(profile: ProviderProfile) -> None:
+    if profile.verification_status != ProviderVerificationStatus.APPROVED.value:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Provider must be approved before using this feature",
+        )
 
 
 @router.post(
@@ -136,7 +157,7 @@ def read_provider_categories(
     current_user: ProviderUser,
     db: DBSession,
 ) -> ProviderCategoriesRead:
-    profile = AuthService.get_provider_profile(db=db, user_id=current_user.id)
+    profile = _provider_profile_for_user(db, current_user)
     return ProviderCategoriesRead(
         category_slugs=CategoryService.get_provider_category_slugs(
             db,
@@ -151,7 +172,8 @@ def update_provider_categories(
     current_user: ProviderUser,
     db: DBSession,
 ) -> ProviderCategoriesRead:
-    profile = AuthService.get_provider_profile(db=db, user_id=current_user.id)
+    profile = _provider_profile_for_user(db, current_user)
+    _ensure_not_rejected(profile)
     return ProviderCategoriesRead(
         category_slugs=CategoryService.set_provider_category_slugs(
             db,
@@ -170,6 +192,8 @@ def read_provider_bookings(
         Query(alias="status"),
     ] = BookingStatus.PENDING,
 ) -> list[BookingRead]:
+    profile = _provider_profile_for_user(db, current_user)
+    _ensure_approved(profile)
     return BookingService.list_provider_bookings(
         db,
         provider_user=current_user,
@@ -184,6 +208,8 @@ def update_provider_booking_status(
     current_user: ProviderUser,
     db: DBSession,
 ) -> BookingRead:
+    profile = _provider_profile_for_user(db, current_user)
+    _ensure_approved(profile)
     return BookingService.update_provider_booking_status(
         db,
         provider_user=current_user,
@@ -198,7 +224,8 @@ def update_provider_profile(
     current_user: ProviderUser,
     db: DBSession,
 ) -> ProviderProfileRead:
-    profile = AuthService.get_provider_profile(db=db, user_id=current_user.id)
+    profile = _provider_profile_for_user(db, current_user)
+    _ensure_approved(profile)
     return ProviderService.update_profile(
         db,
         user=current_user,
@@ -213,6 +240,8 @@ def change_provider_password(
     current_user: ProviderUser,
     db: DBSession,
 ) -> None:
+    profile = _provider_profile_for_user(db, current_user)
+    _ensure_approved(profile)
     ProviderService.change_password(db, user=current_user, payload=payload)
 
 
@@ -241,7 +270,8 @@ def create_provider_document_change_requests(
         File(alias="electricityBill"),
     ] = None,
 ) -> list[ProviderDocumentChangeRead]:
-    profile = AuthService.get_provider_profile(db=db, user_id=current_user.id)
+    profile = _provider_profile_for_user(db, current_user)
+    _ensure_approved(profile)
     requested_documents = [
         (ProviderDocumentType.AADHAAR_FRONT, aadhaar_front, "aadhaar-front-change"),
         (ProviderDocumentType.AADHAAR_BACK, aadhaar_back, "aadhaar-back-change"),
@@ -287,7 +317,8 @@ def read_provider_document_change_requests(
     current_user: ProviderUser,
     db: DBSession,
 ) -> list[ProviderDocumentChangeRead]:
-    profile = AuthService.get_provider_profile(db=db, user_id=current_user.id)
+    profile = _provider_profile_for_user(db, current_user)
+    _ensure_approved(profile)
     return ProviderService.list_document_requests(
         db,
         provider_profile_id=profile.id,
@@ -318,6 +349,9 @@ async def provider_bookings_websocket(
         return
 
     profile = AuthService.get_provider_profile(db=db, user_id=user.id)
+    if profile.verification_status != ProviderVerificationStatus.APPROVED.value:
+        await websocket.close(code=1008)
+        return
     await provider_booking_notifier.connect(profile.id, websocket)
     try:
         while True:

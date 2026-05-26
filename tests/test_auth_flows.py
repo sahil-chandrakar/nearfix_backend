@@ -14,6 +14,7 @@ from app.db.base import Base
 from app.db.session import get_db
 from app.main import app
 from app.models.admin_audit_log import AdminAuditLog
+from app.models.booking import Booking
 from app.models.provider_document_change_request import ProviderDocumentChangeRequest
 from app.models.provider_profile import ProviderProfile, ProviderVerificationStatus
 from app.models.user import User, UserRole
@@ -98,6 +99,20 @@ def register_provider(client: TestClient, phone: str = "7970054822") -> str:
     )
     assert response.status_code == 201
     return response.json()["accessToken"]
+
+
+def update_first_provider_status(
+    status: ProviderVerificationStatus,
+    reason: str | None = None,
+) -> None:
+    def update_provider(db):
+        profile = db.query(ProviderProfile).first()
+        profile.verification_status = status.value
+        profile.rejection_reason = reason
+        db.add(profile)
+        db.commit()
+
+    with_test_db(update_provider)
 
 
 def create_admin_token(client: TestClient, phone: str = "7970054899") -> str:
@@ -246,6 +261,93 @@ def test_invalid_provider_category_slug_returns_validation_error(
     )
 
     assert response.status_code == 422
+
+
+def test_rejected_provider_can_only_read_status_surface(client: TestClient) -> None:
+    token = register_provider(client)
+    update_first_provider_status(
+        ProviderVerificationStatus.REJECTED,
+        reason="Documents are not readable",
+    )
+
+    login_response = client.post(
+        "/api/v1/provider/login",
+        json={"phone": "7970054822", "password": "password123"},
+    )
+    assert login_response.status_code == 200
+
+    profile_response = client.get("/api/v1/provider/me", headers=auth_headers(token))
+    assert profile_response.status_code == 200
+    assert profile_response.json()["verificationStatus"] == "rejected"
+    assert profile_response.json()["rejectionReason"] == "Documents are not readable"
+
+    category_read_response = client.get(
+        "/api/v1/provider/categories",
+        headers=auth_headers(token),
+    )
+    assert category_read_response.status_code == 200
+
+    category_update_response = client.put(
+        "/api/v1/provider/categories",
+        headers=auth_headers(token),
+        json={"categorySlugs": ["plumber"]},
+    )
+    assert category_update_response.status_code == 403
+
+    bookings_response = client.get(
+        "/api/v1/provider/bookings?status=pending",
+        headers=auth_headers(token),
+    )
+    assert bookings_response.status_code == 403
+
+    profile_update_response = client.patch(
+        "/api/v1/provider/me",
+        headers=auth_headers(token),
+        json={
+            "shopCompanyName": "Rejected Shop",
+            "ownerName": "Rejected Owner",
+            "whatsappMobileNumber": "7970054822",
+            "email": "7970054822@example.com",
+            "latitude": 20.5937,
+            "longitude": 78.9629,
+        },
+    )
+    assert profile_update_response.status_code == 403
+
+    documents_response = client.get(
+        "/api/v1/provider/document-change-requests",
+        headers=auth_headers(token),
+    )
+    assert documents_response.status_code == 403
+
+
+def test_pending_provider_with_categories_cannot_use_operational_provider_apis(
+    client: TestClient,
+) -> None:
+    token = register_provider(client)
+
+    save_response = client.put(
+        "/api/v1/provider/categories",
+        headers=auth_headers(token),
+        json={"categorySlugs": ["plumber"]},
+    )
+    assert save_response.status_code == 200
+
+    bookings_response = client.get(
+        "/api/v1/provider/bookings?status=pending",
+        headers=auth_headers(token),
+    )
+    assert bookings_response.status_code == 403
+
+    password_response = client.patch(
+        "/api/v1/provider/password",
+        headers=auth_headers(token),
+        json={
+            "currentPassword": "password123",
+            "newPassword": "password456",
+        },
+    )
+    assert password_response.status_code == 403
 
 
 def test_customer_provider_search_filters_approved_category_and_distance(
@@ -427,6 +529,7 @@ def test_provider_profile_password_and_document_request_flow(
     client: TestClient,
 ) -> None:
     provider_token = register_provider(client)
+    update_first_provider_status(ProviderVerificationStatus.APPROVED)
 
     profile_response = client.patch(
         "/api/v1/provider/me",
@@ -793,3 +896,136 @@ def test_admin_added_service_is_available_until_disabled(client: TestClient) -> 
         json={"categorySlugs": ["solar-panel-cleaning"]},
     )
     assert invalid_save_response.status_code == 422
+
+
+def test_admin_can_delete_unused_custom_service(client: TestClient) -> None:
+    admin_token = create_admin_token(client)
+    provider_token = register_provider(client)
+
+    create_response = client.post(
+        "/api/v1/admin/services",
+        headers=auth_headers(admin_token),
+        json={"label": "Window Cleaning QA", "labelHi": "Window Cleaning Hindi"},
+    )
+    assert create_response.status_code == 201
+    service = create_response.json()
+    assert service["slug"] == "window-cleaning-qa"
+
+    save_response = client.put(
+        "/api/v1/provider/categories",
+        headers=auth_headers(provider_token),
+        json={"categorySlugs": [service["slug"]]},
+    )
+    assert save_response.status_code == 200
+
+    delete_response = client.delete(
+        f"/api/v1/admin/services/{service['id']}",
+        headers=auth_headers(admin_token),
+    )
+    assert delete_response.status_code == 204
+
+    categories_response = client.get("/api/v1/categories")
+    assert categories_response.status_code == 200
+    assert service["slug"] not in [
+        category["slug"] for category in categories_response.json()
+    ]
+
+    admin_services_response = client.get(
+        "/api/v1/admin/services",
+        headers=auth_headers(admin_token),
+    )
+    assert admin_services_response.status_code == 200
+    assert service["slug"] not in [
+        category["slug"] for category in admin_services_response.json()
+    ]
+
+    provider_categories_response = client.get(
+        "/api/v1/provider/categories",
+        headers=auth_headers(provider_token),
+    )
+    assert provider_categories_response.status_code == 200
+    assert provider_categories_response.json()["categorySlugs"] == []
+
+    def assert_audit_log(db):
+        audit_log = db.query(AdminAuditLog).filter_by(action="service_deleted").one()
+        assert audit_log.target_type == "service_category"
+        assert audit_log.target_id == str(service["id"])
+        assert service["slug"] in (audit_log.metadata_json or "")
+
+    with_test_db(assert_audit_log)
+
+
+def test_admin_cannot_delete_default_service(client: TestClient) -> None:
+    admin_token = create_admin_token(client)
+
+    services_response = client.get(
+        "/api/v1/admin/services",
+        headers=auth_headers(admin_token),
+    )
+    assert services_response.status_code == 200
+    plumber = next(
+        service for service in services_response.json() if service["slug"] == "plumber"
+    )
+
+    delete_response = client.delete(
+        f"/api/v1/admin/services/{plumber['id']}",
+        headers=auth_headers(admin_token),
+    )
+
+    assert delete_response.status_code == 400
+    assert delete_response.json()["detail"] == "Default services cannot be deleted"
+
+
+def test_admin_cannot_delete_custom_service_with_bookings(client: TestClient) -> None:
+    admin_token = create_admin_token(client)
+    provider_token = register_provider(client)
+    customer_token = register_customer(client)
+
+    create_response = client.post(
+        "/api/v1/admin/services",
+        headers=auth_headers(admin_token),
+        json={"label": "Booked Cleaning QA", "labelHi": "Booked Cleaning Hindi"},
+    )
+    assert create_response.status_code == 201
+    service = create_response.json()
+
+    save_response = client.put(
+        "/api/v1/provider/categories",
+        headers=auth_headers(provider_token),
+        json={"categorySlugs": [service["slug"]]},
+    )
+    assert save_response.status_code == 200
+
+    update_first_provider_status(ProviderVerificationStatus.APPROVED)
+
+    provider_profile_response = client.get(
+        "/api/v1/provider/me",
+        headers=auth_headers(provider_token),
+    )
+    assert provider_profile_response.status_code == 200
+    provider_id = provider_profile_response.json()["id"]
+
+    booking_response = client.post(
+        "/api/v1/customer/bookings",
+        headers=auth_headers(customer_token),
+        json={
+            "providerProfileId": provider_id,
+            "categorySlug": service["slug"],
+            "latitude": 20.5937,
+            "longitude": 78.9629,
+        },
+    )
+    assert booking_response.status_code == 201
+
+    def assert_booking_saved(db):
+        assert db.query(Booking).filter_by(category_slug=service["slug"]).count() == 1
+
+    with_test_db(assert_booking_saved)
+
+    delete_response = client.delete(
+        f"/api/v1/admin/services/{service['id']}",
+        headers=auth_headers(admin_token),
+    )
+
+    assert delete_response.status_code == 400
+    assert delete_response.json()["detail"] == "Service has bookings. Disable it instead."

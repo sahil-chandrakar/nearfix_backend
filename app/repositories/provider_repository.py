@@ -126,6 +126,14 @@ class ProviderRepository:
         )
 
     @staticmethod
+    def delete_category_slug(db: Session, *, category_slug: str) -> None:
+        db.execute(
+            delete(ProviderCategory).where(
+                ProviderCategory.category_slug == category_slug,
+            )
+        )
+
+    @staticmethod
     def create(
         db: Session,
         *,

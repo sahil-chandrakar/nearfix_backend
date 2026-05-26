@@ -6,6 +6,7 @@ from fastapi.responses import FileResponse
 from sqlalchemy import func, select
 
 from app.api.deps import AdminUser, DBSession
+from app.core.categories import CATEGORY_BY_SLUG
 from app.core.security import create_access_token, get_password_hash
 from app.models.booking import Booking, BookingStatus
 from app.models.customer_home_banner import CustomerHomeBanner
@@ -647,3 +648,39 @@ def update_service(
         metadata=payload.model_dump(exclude_none=True),
     )
     return _category_to_read(updated)
+
+
+@router.delete("/services/{service_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_service(service_id: int, current_user: AdminUser, db: DBSession) -> None:
+    category = ServiceCategoryRepository.get_by_id(db, category_id=service_id)
+    if category is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Service not found")
+    if category.slug in CATEGORY_BY_SLUG:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Default services cannot be deleted",
+        )
+
+    booking_count = _count(
+        db,
+        select(func.count())
+        .select_from(Booking)
+        .where(Booking.category_slug == category.slug),
+    )
+    if booking_count > 0:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Service has bookings. Disable it instead.",
+        )
+
+    service_slug = category.slug
+    ProviderRepository.delete_category_slug(db, category_slug=service_slug)
+    ServiceCategoryRepository.delete(db, category=category)
+    AuditRepository.create(
+        db,
+        admin_user=current_user,
+        action="service_deleted",
+        target_type="service_category",
+        target_id=service_id,
+        metadata={"slug": service_slug},
+    )

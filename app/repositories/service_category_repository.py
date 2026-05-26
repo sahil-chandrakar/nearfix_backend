@@ -101,6 +101,11 @@ class ServiceCategoryRepository:
         return category
 
     @staticmethod
+    def delete(db: Session, *, category: ServiceCategory) -> None:
+        db.delete(category)
+        db.commit()
+
+    @staticmethod
     def next_display_order(db: Session, *, group: str) -> int:
         ServiceCategoryRepository.ensure_seeded(db)
         categories = ServiceCategoryRepository.list_categories(db, active_only=False)
