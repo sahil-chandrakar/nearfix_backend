@@ -5,6 +5,7 @@ from app.core.security import create_access_token
 from app.schemas.auth import LoginRequest, Token
 from app.schemas.user import UserCreate, UserRead
 from app.services.auth_service import AuthService
+from app.services.booking_notifier import app_notification_notifier
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -19,12 +20,13 @@ def register(payload: UserCreate, db: DBSession) -> UserRead:
 
 
 @router.post("/login", response_model=Token)
-def login(payload: LoginRequest, db: DBSession) -> Token:
+async def login(payload: LoginRequest, db: DBSession) -> Token:
     user = AuthService.authenticate_user(
         db=db,
         email=payload.email,
         password=payload.password,
     )
+    await app_notification_notifier.notify_user_logged_in(user=user)
     return Token(access_token=create_access_token(subject=user.id))
 
 

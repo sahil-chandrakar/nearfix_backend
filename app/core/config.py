@@ -22,14 +22,19 @@ class Settings(BaseSettings):
 
     secret_key: str = "change-this-secret-before-production"
     algorithm: str = "HS256"
-    access_token_expire_minutes: int = 60
+    access_token_expire_minutes: int = 0
 
     mysql_host: str = "localhost"
     mysql_port: int = 3306
     mysql_user: str = "nearfix_user"
     mysql_password: str = "nearfix_password"
     mysql_database: str = "nearfix"
+    mysql_unix_socket: str | None = None
+
+    storage_backend: Literal["local", "gcs"] = "local"
     upload_dir: str = "uploads"
+    gcs_bucket_name: str = ""
+    gcs_upload_prefix: str = "uploads"
 
     @property
     def database_url(self) -> URL:
@@ -37,10 +42,13 @@ class Settings(BaseSettings):
             "mysql+pymysql",
             username=self.mysql_user,
             password=self.mysql_password,
-            host=self.mysql_host,
-            port=self.mysql_port,
             database=self.mysql_database,
-            query={"charset": "utf8mb4"},
+            host=None if self.mysql_unix_socket else self.mysql_host,
+            port=None if self.mysql_unix_socket else self.mysql_port,
+            query={
+                "charset": "utf8mb4",
+                **({"unix_socket": self.mysql_unix_socket} if self.mysql_unix_socket else {}),
+            },
         )
 
 

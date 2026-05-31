@@ -36,7 +36,11 @@ from app.schemas.provider import (
 )
 from app.schemas.provider_document import ProviderDocumentChangeRead
 from app.services.auth_service import AuthService
-from app.services.booking_notifier import provider_booking_notifier
+from app.services.booking_notifier import (
+    app_notification_notifier,
+    booking_cycle_notifier,
+    provider_booking_notifier,
+)
 from app.services.booking_service import BookingService
 from app.services.category_service import CategoryService
 from app.services.provider_service import ProviderService
@@ -70,7 +74,7 @@ def _ensure_approved(profile: ProviderProfile) -> None:
     response_model=Token,
     status_code=status.HTTP_201_CREATED,
 )
-def register_provider(
+async def register_provider(
     shop_company_name: Annotated[
         str,
         Form(alias="shopCompanyName", min_length=2, max_length=255),
@@ -133,17 +137,19 @@ def register_provider(
         payment_bill_path=payment_bill_path,
         electricity_bill_path=electricity_bill_path,
     )
+    await app_notification_notifier.notify_user_logged_in(user=user)
     return Token(access_token=create_access_token(subject=user.id))
 
 
 @router.post("/login", response_model=Token)
-def login_provider(payload: PhoneLoginRequest, db: DBSession) -> Token:
+async def login_provider(payload: PhoneLoginRequest, db: DBSession) -> Token:
     user = AuthService.authenticate_phone(
         db=db,
         phone=payload.phone,
         password=payload.password,
         expected_role=UserRole.PROVIDER,
     )
+    await app_notification_notifier.notify_user_logged_in(user=user)
     return Token(access_token=create_access_token(subject=user.id))
 
 
@@ -202,7 +208,7 @@ def read_provider_bookings(
 
 
 @router.patch("/bookings/{booking_id}/status", response_model=BookingRead)
-def update_provider_booking_status(
+async def update_provider_booking_status(
     booking_id: int,
     payload: BookingStatusUpdate,
     current_user: ProviderUser,
@@ -210,12 +216,14 @@ def update_provider_booking_status(
 ) -> BookingRead:
     profile = _provider_profile_for_user(db, current_user)
     _ensure_approved(profile)
-    return BookingService.update_provider_booking_status(
+    booking = BookingService.update_provider_booking_status(
         db,
         provider_user=current_user,
         booking_id=booking_id,
         booking_status=payload.status,
     )
+    await booking_cycle_notifier.notify_booking_status_changed(booking=booking)
+    return booking
 
 
 @router.patch("/me", response_model=ProviderProfileRead)

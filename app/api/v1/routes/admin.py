@@ -2,7 +2,7 @@ from typing import Annotated
 import re
 
 from fastapi import APIRouter, File, Form, HTTPException, Query, UploadFile, status
-from fastapi.responses import FileResponse
+from fastapi.responses import Response
 from sqlalchemy import func, select
 
 from app.api.deps import AdminUser, DBSession
@@ -20,10 +20,12 @@ from app.models.service_category import ServiceCategory
 from app.models.user import User, UserRole
 from app.repositories.audit_repository import AuditRepository
 from app.repositories.banner_repository import BannerRepository
+from app.repositories.brand_repository import BrandRepository
 from app.repositories.booking_repository import BookingRepository
 from app.repositories.provider_document_repository import ProviderDocumentRepository
 from app.repositories.provider_repository import ProviderRepository
 from app.repositories.service_category_repository import ServiceCategoryRepository
+from app.repositories.support_repository import SupportRepository
 from app.repositories.user_repository import UserRepository
 from app.schemas.admin import (
     AdminAuditLogRead,
@@ -38,13 +40,27 @@ from app.schemas.admin import (
 )
 from app.schemas.auth import Token
 from app.schemas.banner import BannerRead, BannerSettingsRead, BannerSettingsUpdate, BannerUpdate
+from app.schemas.brand import (
+    BrandCreate,
+    BrandManualStoreCreate,
+    BrandProviderStoreCreate,
+    BrandRead,
+    BrandServiceCreate,
+    BrandServiceRead,
+    BrandServiceUpdate,
+    BrandStoreRead,
+    BrandStoreUpdate,
+    BrandUpdate,
+)
 from app.schemas.category import ServiceCategoryCreate, ServiceCategoryRead, ServiceCategoryUpdate
 from app.schemas.provider import ProviderVerificationUpdate
 from app.schemas.provider_document import (
     ProviderDocumentChangeRead,
     ProviderDocumentChangeReview,
 )
+from app.schemas.support import SupportDetailsRead, SupportDetailsUpdate
 from app.services.auth_service import AuthService
+from app.services.brand_service import BrandService
 from app.services.booking_service import BookingService
 from app.services.provider_service import ProviderService
 from app.services.upload_service import UploadService
@@ -265,7 +281,7 @@ def read_provider_document(
     document_type: ProviderDocumentType,
     _current_user: AdminUser,
     db: DBSession,
-) -> FileResponse:
+) -> Response:
     profile = ProviderRepository.get_by_id(db, provider_id=provider_id)
     if profile is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Provider not found")
@@ -275,9 +291,7 @@ def read_provider_document(
         ProviderDocumentType.PAYMENT_BILL: profile.payment_bill_path,
         ProviderDocumentType.ELECTRICITY_BILL: profile.electricity_bill_path,
     }
-    return FileResponse(
-        UploadService.resolve_safe_upload_path(document_path_by_type[document_type])
-    )
+    return UploadService.file_response(document_path_by_type[document_type])
 
 
 @router.get(
@@ -339,11 +353,11 @@ def read_provider_document_change_file(
     request_id: int,
     _current_user: AdminUser,
     db: DBSession,
-) -> FileResponse:
+) -> Response:
     request = ProviderDocumentRepository.get_by_id(db, request_id)
     if request is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document request not found")
-    return FileResponse(UploadService.resolve_safe_upload_path(request.document_path))
+    return UploadService.file_response(request.document_path)
 
 
 @router.get("/customers", response_model=list[AdminCustomerRead])
@@ -531,6 +545,7 @@ def delete_banner(banner_id: int, current_user: AdminUser, db: DBSession) -> Non
     banner = BannerRepository.get_by_id(db, banner_id=banner_id)
     if banner is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Banner not found")
+    UploadService.delete_file(banner.image_path)
     BannerRepository.delete(db, banner=banner)
     AuditRepository.create(
         db,
@@ -546,11 +561,11 @@ def read_admin_banner_image(
     banner_id: int,
     _current_user: AdminUser,
     db: DBSession,
-) -> FileResponse:
+) -> Response:
     banner = BannerRepository.get_by_id(db, banner_id=banner_id)
     if banner is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Banner not found")
-    return FileResponse(UploadService.resolve_safe_upload_path(banner.image_path))
+    return UploadService.file_response(banner.image_path)
 
 
 @router.get("/banner-settings", response_model=BannerSettingsRead)
@@ -573,6 +588,216 @@ def update_banner_settings(
         metadata={"bannerLimit": banner_limit},
     )
     return BannerSettingsRead(banner_limit=banner_limit)
+
+
+@router.get("/support-details", response_model=SupportDetailsRead)
+def read_admin_support_details(_current_user: AdminUser, db: DBSession) -> SupportDetailsRead:
+    return SupportRepository.get_details(db)
+
+
+@router.patch("/support-details", response_model=SupportDetailsRead)
+def update_admin_support_details(
+    payload: SupportDetailsUpdate,
+    current_user: AdminUser,
+    db: DBSession,
+) -> SupportDetailsRead:
+    details = SupportRepository.set_details(db, payload=payload)
+    AuditRepository.create(
+        db,
+        admin_user=current_user,
+        action="support_details_updated",
+        target_type="support_details",
+        metadata=details.model_dump(by_alias=True, mode="json"),
+    )
+    return details
+
+
+@router.get("/brands", response_model=list[BrandRead])
+def list_brands(_current_user: AdminUser, db: DBSession) -> list[BrandRead]:
+    return BrandService.list_brands(db, active_only=False)
+
+
+@router.post("/brands", response_model=BrandRead, status_code=status.HTTP_201_CREATED)
+def create_brand(
+    payload: BrandCreate,
+    current_user: AdminUser,
+    db: DBSession,
+) -> BrandRead:
+    brand = BrandService.create_brand(db, name=payload.name)
+    AuditRepository.create(
+        db,
+        admin_user=current_user,
+        action="brand_created",
+        target_type="customer_brand",
+        target_id=brand.id,
+        metadata={"slug": brand.slug, "name": brand.name},
+    )
+    return brand
+
+
+@router.patch("/brands/{brand_id}", response_model=BrandRead)
+def update_brand(
+    brand_id: int,
+    payload: BrandUpdate,
+    current_user: AdminUser,
+    db: DBSession,
+) -> BrandRead:
+    brand = BrandService.update_brand(
+        db,
+        brand_id=brand_id,
+        name=payload.name,
+        display_order=payload.display_order,
+        is_active=payload.is_active,
+    )
+    AuditRepository.create(
+        db,
+        admin_user=current_user,
+        action="brand_updated",
+        target_type="customer_brand",
+        target_id=brand_id,
+        metadata=payload.model_dump(exclude_none=True),
+    )
+    return brand
+
+
+@router.get("/brands/{brand_id}/services", response_model=list[BrandServiceRead])
+def list_brand_services(
+    brand_id: int,
+    _current_user: AdminUser,
+    db: DBSession,
+) -> list[BrandServiceRead]:
+    return BrandService.list_admin_brand_services(db, brand_id=brand_id)
+
+
+@router.post(
+    "/brands/{brand_id}/services",
+    response_model=BrandServiceRead,
+    status_code=status.HTTP_201_CREATED,
+)
+def create_brand_service(
+    brand_id: int,
+    payload: BrandServiceCreate,
+    current_user: AdminUser,
+    db: DBSession,
+) -> BrandServiceRead:
+    brand_service = BrandService.create_brand_service(db, brand_id=brand_id, payload=payload)
+    AuditRepository.create(
+        db,
+        admin_user=current_user,
+        action="brand_service_created",
+        target_type="customer_brand_service",
+        target_id=brand_service.id,
+        metadata={"brandId": brand_id, "categorySlug": brand_service.category_slug},
+    )
+    return brand_service
+
+
+@router.patch("/brand-services/{brand_service_id}", response_model=BrandServiceRead)
+def update_brand_service(
+    brand_service_id: int,
+    payload: BrandServiceUpdate,
+    current_user: AdminUser,
+    db: DBSession,
+) -> BrandServiceRead:
+    brand_service = BrandService.update_brand_service(
+        db,
+        brand_service_id=brand_service_id,
+        payload=payload,
+    )
+    AuditRepository.create(
+        db,
+        admin_user=current_user,
+        action="brand_service_updated",
+        target_type="customer_brand_service",
+        target_id=brand_service_id,
+        metadata=payload.model_dump(exclude_none=True),
+    )
+    return brand_service
+
+
+@router.get("/brand-services/{brand_service_id}/stores", response_model=list[BrandStoreRead])
+def list_brand_stores(
+    brand_service_id: int,
+    _current_user: AdminUser,
+    db: DBSession,
+) -> list[BrandStoreRead]:
+    return BrandService.list_admin_brand_stores(db, brand_service_id=brand_service_id)
+
+
+@router.post(
+    "/brand-services/{brand_service_id}/stores/provider",
+    response_model=BrandStoreRead,
+    status_code=status.HTTP_201_CREATED,
+)
+def create_provider_brand_store(
+    brand_service_id: int,
+    payload: BrandProviderStoreCreate,
+    current_user: AdminUser,
+    db: DBSession,
+) -> BrandStoreRead:
+    store = BrandService.create_provider_store(
+        db,
+        brand_service_id=brand_service_id,
+        payload=payload,
+    )
+    AuditRepository.create(
+        db,
+        admin_user=current_user,
+        action="brand_store_provider_created",
+        target_type="customer_brand_store",
+        target_id=store.id,
+        metadata={
+            "brandServiceId": brand_service_id,
+            "providerProfileId": store.provider_profile_id,
+        },
+    )
+    return store
+
+
+@router.post(
+    "/brand-services/{brand_service_id}/stores/manual",
+    response_model=BrandStoreRead,
+    status_code=status.HTTP_201_CREATED,
+)
+def create_manual_brand_store(
+    brand_service_id: int,
+    payload: BrandManualStoreCreate,
+    current_user: AdminUser,
+    db: DBSession,
+) -> BrandStoreRead:
+    store = BrandService.create_manual_store(
+        db,
+        brand_service_id=brand_service_id,
+        payload=payload,
+    )
+    AuditRepository.create(
+        db,
+        admin_user=current_user,
+        action="brand_store_manual_created",
+        target_type="customer_brand_store",
+        target_id=store.id,
+        metadata={"brandServiceId": brand_service_id, "shopName": store.shop_name},
+    )
+    return store
+
+
+@router.patch("/brand-stores/{store_id}", response_model=BrandStoreRead)
+def update_brand_store(
+    store_id: int,
+    payload: BrandStoreUpdate,
+    current_user: AdminUser,
+    db: DBSession,
+) -> BrandStoreRead:
+    store = BrandService.update_brand_store(db, store_id=store_id, payload=payload)
+    AuditRepository.create(
+        db,
+        admin_user=current_user,
+        action="brand_store_updated",
+        target_type="customer_brand_store",
+        target_id=store_id,
+        metadata=payload.model_dump(exclude_none=True),
+    )
+    return store
 
 
 @router.get("/services", response_model=list[ServiceCategoryRead])
@@ -675,6 +900,7 @@ def delete_service(service_id: int, current_user: AdminUser, db: DBSession) -> N
 
     service_slug = category.slug
     ProviderRepository.delete_category_slug(db, category_slug=service_slug)
+    BrandRepository.delete_brand_services_by_category(db, category_slug=service_slug)
     ServiceCategoryRepository.delete(db, category=category)
     AuditRepository.create(
         db,

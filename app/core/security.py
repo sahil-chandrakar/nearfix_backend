@@ -21,12 +21,13 @@ def create_access_token(
     subject: str | int,
     expires_delta: timedelta | None = None,
 ) -> str:
-    expire = datetime.now(timezone.utc) + (
-        expires_delta
-        if expires_delta is not None
-        else timedelta(minutes=settings.access_token_expire_minutes)
-    )
-    to_encode: dict[str, Any] = {"sub": str(subject), "exp": expire}
+    to_encode: dict[str, Any] = {"sub": str(subject)}
+    if expires_delta is not None:
+        to_encode["exp"] = datetime.now(timezone.utc) + expires_delta
+    elif settings.access_token_expire_minutes > 0:
+        to_encode["exp"] = datetime.now(timezone.utc) + timedelta(
+            minutes=settings.access_token_expire_minutes
+        )
     return jwt.encode(to_encode, settings.secret_key, algorithm=settings.algorithm)
 
 

@@ -1,5 +1,5 @@
 from fastapi import APIRouter, HTTPException, status
-from fastapi.responses import FileResponse
+from fastapi.responses import Response
 
 from app.api.deps import CustomerUser, DBSession
 from app.core.security import create_access_token
@@ -7,6 +7,7 @@ from app.models.user import UserRole
 from app.repositories.banner_repository import BannerRepository
 from app.schemas.auth import Token
 from app.schemas.banner import BannerRead
+from app.schemas.brand import BrandRead, BrandServiceRead, BrandStoreRead
 from app.schemas.booking import BookingCreate, BookingRead
 from app.schemas.category import CustomerProviderSearchResult
 from app.schemas.customer import (
@@ -16,7 +17,8 @@ from app.schemas.customer import (
 )
 from app.schemas.user import UserRead
 from app.services.auth_service import AuthService
-from app.services.booking_notifier import provider_booking_notifier
+from app.services.brand_service import BrandService
+from app.services.booking_notifier import app_notification_notifier, booking_cycle_notifier
 from app.services.booking_service import BookingService
 from app.services.category_service import CategoryService
 from app.services.upload_service import UploadService
@@ -29,19 +31,21 @@ router = APIRouter(prefix="/customer", tags=["customer"])
     response_model=Token,
     status_code=status.HTTP_201_CREATED,
 )
-def register_customer(payload: CustomerRegisterRequest, db: DBSession) -> Token:
+async def register_customer(payload: CustomerRegisterRequest, db: DBSession) -> Token:
     user = AuthService.register_customer(db=db, payload=payload)
+    await app_notification_notifier.notify_user_logged_in(user=user)
     return Token(access_token=create_access_token(subject=user.id))
 
 
 @router.post("/login", response_model=Token)
-def login_customer(payload: PhoneLoginRequest, db: DBSession) -> Token:
+async def login_customer(payload: PhoneLoginRequest, db: DBSession) -> Token:
     user = AuthService.authenticate_phone(
         db=db,
         phone=payload.phone,
         password=payload.password,
         expected_role=UserRole.CUSTOMER,
     )
+    await app_notification_notifier.notify_user_logged_in(user=user)
     return Token(access_token=create_access_token(subject=user.id))
 
 
@@ -67,11 +71,42 @@ def read_customer_banners(db: DBSession) -> list[BannerRead]:
 
 
 @router.get("/banners/{banner_id}/image")
-def read_customer_banner_image(banner_id: int, db: DBSession) -> FileResponse:
+def read_customer_banner_image(banner_id: int, db: DBSession) -> Response:
     banner = BannerRepository.get_by_id(db, banner_id=banner_id)
     if banner is None or not banner.is_active:
         raise HTTPException(status_code=404, detail="Banner not found")
-    return FileResponse(UploadService.resolve_safe_upload_path(banner.image_path))
+    return UploadService.file_response(banner.image_path)
+
+
+@router.get("/brands", response_model=list[BrandRead])
+def read_customer_brands(db: DBSession) -> list[BrandRead]:
+    return BrandService.list_brands(db)
+
+
+@router.get("/brands/{brand_slug}/services", response_model=list[BrandServiceRead])
+def read_customer_brand_services(brand_slug: str, db: DBSession) -> list[BrandServiceRead]:
+    return BrandService.list_customer_brand_services(db, brand_slug=brand_slug)
+
+
+@router.get(
+    "/brands/{brand_slug}/services/{category_slug}/stores",
+    response_model=list[BrandStoreRead],
+)
+def read_customer_brand_stores(
+    brand_slug: str,
+    category_slug: str,
+    current_user: CustomerUser,
+    db: DBSession,
+    lat: float | None = None,
+    lng: float | None = None,
+) -> list[BrandStoreRead]:
+    return BrandService.list_customer_brand_stores(
+        db,
+        brand_slug=brand_slug,
+        category_slug=category_slug,
+        latitude=lat,
+        longitude=lng,
+    )
 
 
 @router.patch("/me", response_model=UserRead)
@@ -102,7 +137,7 @@ async def create_customer_booking(
         customer=current_user,
         payload=payload,
     )
-    await provider_booking_notifier.notify_booking_created(
+    await booking_cycle_notifier.notify_booking_created(
         provider_profile_id=booking.provider_profile_id,
         booking=booking,
     )
